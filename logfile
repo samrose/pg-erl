@@ -1,0 +1,10 @@
+2025-07-12 14:20:47.087 EDT [1950] LOG:  starting PostgreSQL 17.5 on aarch64-unknown-linux-gnu, compiled by clang version 19.1.7, 64-bit
+2025-07-12 14:20:47.087 EDT [1950] LOG:  listening on IPv6 address "::1", port 5432
+2025-07-12 14:20:47.087 EDT [1950] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+2025-07-12 14:20:47.088 EDT [1950] FATAL:  could not create lock file "/run/postgresql/.s.PGSQL.5432.lock": No such file or directory
+2025-07-12 14:20:47.088 EDT [1950] LOG:  database system is shut down
+2025-07-12 14:20:51.338 EDT [1954] LOG:  starting PostgreSQL 17.5 on aarch64-unknown-linux-gnu, compiled by clang version 19.1.7, 64-bit
+2025-07-12 14:20:51.339 EDT [1954] LOG:  listening on IPv6 address "::1", port 5432
+2025-07-12 14:20:51.339 EDT [1954] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+2025-07-12 14:20:51.340 EDT [1954] FATAL:  could not create lock file "/run/postgresql/.s.PGSQL.5432.lock": No such file or directory
+2025-07-12 14:20:51.340 EDT [1954] LOG:  database system is shut down

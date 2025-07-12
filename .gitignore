@@ -1,0 +1,10 @@
+result
+result-*
+.env
+.env.*
+.envrc
+.envrc.*
+.envrc.lock
+.envrc.lock.*
+.envrc.lock.*.*
+.envrc.lock.*.*.*

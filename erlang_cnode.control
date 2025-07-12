@@ -1,0 +1,4 @@
+comment = 'Erlang C-Node integration for PostgreSQL'
+default_version = '1.0'
+module_pathname = '$libdir/erlang_cnode'
+relocatable = true 
