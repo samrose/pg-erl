@@ -10,40 +10,37 @@ A PostgreSQL extension that acts as an Erlang C-Node using the `ei` library, all
 - **Robust memory management**: Uses PostgreSQL memory contexts and proper `ei` library cleanup
 - **Connection pooling**: Stores connections in a hash table for reuse
 
-## Dependencies
+## Development Environment
 
-- PostgreSQL development libraries (`postgresql-server-dev-all`)
-- Erlang erl_interface library (`liberlinterface-dev`)
+This project uses Nix for reproducible development environments.
 
-### Installation on Ubuntu/Debian
+### Prerequisites
 
-```bash
-sudo apt-get install postgresql-server-dev-all liberlinterface-dev
-```
+- Nix with flakes enabled
+- Linux environment (tested on Ubuntu)
 
-### Installation on macOS
+### Getting Started
 
-```bash
-brew install postgresql erlang
-```
-
-### Installation on Fedora/RHEL
-
-```bash
-sudo dnf install postgresql-server-devel erlang-erlang-interface
-```
-
-## Building and Installation
-
-1. **Clone and build the extension**:
+1. **Enter the development environment**:
    ```bash
-   make
-   sudo make install
+   nix develop
    ```
 
-2. **Enable the extension in PostgreSQL**:
-   ```sql
-   CREATE EXTENSION erlang_cnode;
+2. **Build the extension**:
+   ```bash
+   nix build
+   ```
+
+3. **Start PostgreSQL with the extension**:
+   ```bash
+   reset-postgres
+   start-postgres
+   create-testdb
+   ```
+
+4. **Enable the extension**:
+   ```bash
+   psql testdb -c "CREATE EXTENSION erlang_cnode;"
    ```
 
 ## Usage Examples
@@ -52,41 +49,29 @@ sudo dnf install postgresql-server-devel erlang-erlang-interface
 
 ```sql
 -- Connect to an Erlang node
-SELECT erlang_connect('node1@host', 'cookie123');
+SELECT erlang_connect('testnode@127.0.1.1', 'cookie123');
 
--- Call a remote function (e.g., lists:reverse([1, 2, 3]))
-SELECT erlang_call('node1@host', 'lists', 'reverse', '[{"type": "list", "value": [1, 2, 3]}]'::jsonb);
+-- Call a remote function
+SELECT erlang_call('testnode@127.0.1.1', 'erlang', 'node', '[]'::jsonb);
 
 -- Disconnect
-SELECT erlang_disconnect('node1@host');
+SELECT erlang_disconnect('testnode@127.0.1.1');
 ```
 
 ### Setting up an Erlang Node for Testing
 
 1. **Start an Erlang node**:
    ```bash
-   erl -name node1@host -setcookie cookie123
+   erl -name testnode@127.0.1.1 -setcookie cookie123
    ```
 
-2. **In the Erlang shell, define a test function**:
-   ```erlang
-   -module(test).
-   -export([hello/0, add/2]).
-   
-   hello() -> "Hello from Erlang!".
-   add(A, B) -> A + B.
-   ```
-
-3. **Test from PostgreSQL**:
+2. **Test from PostgreSQL**:
    ```sql
    -- Connect
-   SELECT erlang_connect('node1@host', 'cookie123');
+   SELECT erlang_connect('testnode@127.0.1.1', 'cookie123');
    
-   -- Call hello function
-   SELECT erlang_call('node1@host', 'test', 'hello', '[]'::jsonb);
-   
-   -- Call add function
-   SELECT erlang_call('node1@host', 'test', 'add', '[{"type": "number", "value": 5}, {"type": "number", "value": 3}]'::jsonb);
+   -- Call a function
+   SELECT erlang_call('testnode@127.0.1.1', 'erlang', 'self', '[]'::jsonb);
    ```
 
 ## API Reference
@@ -95,7 +80,7 @@ SELECT erlang_disconnect('node1@host');
 
 Connects to an Erlang node with the specified name and cookie.
 
-- `node_name`: The Erlang node name (e.g., 'node1@host')
+- `node_name`: The Erlang node name (e.g., 'testnode@127.0.1.1')
 - `cookie`: The Erlang cookie for authentication
 - Returns: `true` on success, throws error on failure
 
@@ -116,45 +101,23 @@ Disconnects from the specified Erlang node.
 - `node_name`: The Erlang node name to disconnect from
 - Returns: `true` if connection was found and closed, `false` if no connection existed
 
-## Memory Management
+## Available Commands
 
-The extension implements robust memory management to prevent leaks:
+The development environment provides several convenience commands:
 
-1. **PostgreSQL Memory Contexts**: Uses temporary memory contexts for each function call
-2. **ei Library Cleanup**: Explicitly frees `ei_x_buff` and other ei-allocated resources
-3. **Connection State**: Stores connections in a hash table with proper cleanup
-4. **Error Handling**: Ensures cleanup before throwing errors
-
-## Configuration
-
-### Erlang Interface Paths
-
-The Makefile includes default paths for different systems. You can override them:
-
-```bash
-# For custom Erlang installation
-make ERL_INTERFACE_INCLUDE_DIR=/path/to/include ERL_INTERFACE_LIB_DIR=/path/to/lib
-```
-
-### Common Paths
-
-- **Ubuntu/Debian**: `/usr/lib/erlang/usr/include` and `/usr/lib/erlang/usr/lib`
-- **macOS (Homebrew)**: `/usr/local/lib/erlang/usr/include` and `/usr/local/lib/erlang/usr/lib`
-- **Fedora/RHEL**: `/usr/lib64/erlang/usr/include` and `/usr/lib64/erlang/usr/lib`
+- `start-postgres` - Initialize and start PostgreSQL
+- `stop-postgres` - Stop PostgreSQL
+- `create-testdb` - Create testdb database
+- `reset-postgres` - Reset data directory and re-init PostgreSQL
+- `setup-elixir` - Start an Elixir node for testing
 
 ## Troubleshooting
 
-### Build Issues
+### Common Issues
 
-1. **Missing Erlang headers**: Ensure `liberlinterface-dev` is installed
-2. **Wrong paths**: Check and set correct `ERL_INTERFACE_INCLUDE_DIR` and `ERL_INTERFACE_LIB_DIR`
-3. **PostgreSQL version**: Ensure PostgreSQL development headers match your PostgreSQL version
-
-### Runtime Issues
-
-1. **Connection failures**: Verify Erlang node is running and accessible
-2. **Cookie mismatch**: Ensure the cookie matches between PostgreSQL and Erlang
-3. **Permission issues**: Check network connectivity and firewall settings
+1. **PostgreSQL won't start**: Check if port 5432 is available
+2. **Connection refused**: Ensure Erlang node is running with correct hostname
+3. **Cookie mismatch**: Verify both PostgreSQL and Erlang use the same cookie
 
 ### Debugging
 
@@ -171,14 +134,6 @@ SET log_min_messages = 'debug1';
 2. **Thread Safety**: Assumes backend-local connections; shared connections require additional locking
 3. **Security**: Basic input validation; production use requires additional security measures
 4. **Error Recovery**: Limited handling of Erlang node crashes or network failures
-
-## Future Enhancements
-
-- Full JSONB-to-Erlang term conversion
-- Connection pooling and timeout management
-- Enhanced error handling and recovery
-- Security improvements and input validation
-- Performance optimizations for high concurrency
 
 ## License
 

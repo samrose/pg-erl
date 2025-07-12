@@ -119,15 +119,106 @@ int jsonb_to_erlang_args(ei_x_buff *buf, Jsonb *args_json) {
 
 // Convert Erlang term to JSONB (simplified - for response parsing)
 Jsonb *erlang_term_to_jsonb(ei_x_buff *buf) {
-    // This is a placeholder implementation
-    // In a full implementation, you'd decode the Erlang term and convert to JSONB
+    // For now, let's try to decode a simple term and return it as a string
+    // This is a basic implementation - in production you'd want full term decoding
     
-    // For now, return a simple string result
+    // Create a working copy of the buffer
+    ei_x_buff result_buf;
+    ei_x_new_with_version(&result_buf);
+    
+    // Copy the buffer content
+    memcpy(result_buf.buff, buf->buff, buf->index);
+    result_buf.index = 0; // Start from beginning
+    
+    // Try to decode the first term
+    int type, size;
+    int decode_result = ei_get_type(result_buf.buff, &result_buf.index, &type, &size);
+    
     JsonbValue jbv;
     jbv.type = jbvString;
-    jbv.val.string.val = "erlang_result";
-    jbv.val.string.len = strlen(jbv.val.string.val);
     
+    // Create a simple string representation based on the type
+    char type_str[256];
+    snprintf(type_str, sizeof(type_str), "buffer_size=%d, type=%d, size=%d, decode_result=%d", buf->index, type, size, decode_result);
+    
+    // If we got an atom_cache_ref, try to skip past the RPC header
+    if (type == 131) { // ERL_ATOM_CACHE_REF
+        // Skip the atom cache ref and try to get the next term
+        result_buf.index += 1; // Skip the cache ref
+        decode_result = ei_get_type(result_buf.buff, &result_buf.index, &type, &size);
+        snprintf(type_str, sizeof(type_str), "after_skip: type=%d, size=%d", type, size);
+    }
+    
+    // Add hex dump of first few bytes for debugging
+    char hex_dump[512];
+    int hex_len = 0;
+    hex_len += snprintf(hex_dump, sizeof(hex_dump), "hex: ");
+    for (int i = 0; i < 10 && i < buf->index; i++) {
+        hex_len += snprintf(hex_dump + hex_len, sizeof(hex_dump) - hex_len, "%02x ", (unsigned char)buf->buff[i]);
+    }
+    strcat(type_str, " ");
+    strcat(type_str, hex_dump);
+    
+    switch (type) {
+        case 13: // ERL_SMALL_TUPLE_EXT
+        case ERL_SMALL_TUPLE_EXT:
+        case ERL_LARGE_TUPLE_EXT: {
+            snprintf(type_str, sizeof(type_str), "tuple[%d]: ", size);
+            int len = strlen(type_str);
+            
+            // Try to decode tuple elements
+            for (int i = 0; i < size && i < 5; i++) { // Limit to 5 elements for safety
+                int elem_type, elem_size;
+                ei_get_type(result_buf.buff, &result_buf.index, &elem_type, &elem_size);
+                
+                if (elem_type == ERL_SMALL_INTEGER_EXT) {
+                    unsigned char val;
+                    ei_decode_char(result_buf.buff, &result_buf.index, &val);
+                    len += snprintf(type_str + len, sizeof(type_str) - len, "%d", val);
+                } else if (elem_type == ERL_ATOM_EXT) {
+                    char atom[256];
+                    ei_decode_atom(result_buf.buff, &result_buf.index, atom);
+                    len += snprintf(type_str + len, sizeof(type_str) - len, "%s", atom);
+                } else {
+                    len += snprintf(type_str + len, sizeof(type_str) - len, "?");
+                }
+                
+                if (i < size - 1) {
+                    len += snprintf(type_str + len, sizeof(type_str) - len, ",");
+                }
+            }
+            break;
+        }
+        case ERL_LIST_EXT:
+            snprintf(type_str, sizeof(type_str), "list[%d]", size);
+            break;
+        case ERL_SMALL_INTEGER_EXT: {
+            unsigned char val;
+            ei_decode_char(result_buf.buff, &result_buf.index, &val);
+            snprintf(type_str, sizeof(type_str), "integer: %d", val);
+            break;
+        }
+        case ERL_FLOAT_EXT:
+            snprintf(type_str, sizeof(type_str), "float");
+            break;
+        case ERL_ATOM_EXT: {
+            char atom[256];
+            ei_decode_atom(result_buf.buff, &result_buf.index, atom);
+            snprintf(type_str, sizeof(type_str), "atom: %s", atom);
+            break;
+        }
+        case 131: // ERL_ATOM_CACHE_REF
+            snprintf(type_str, sizeof(type_str), "atom_cache_ref");
+            break;
+        default:
+            snprintf(type_str, sizeof(type_str), "type_%d", type);
+            break;
+    }
+    
+    jbv.val.string.val = type_str;
+    jbv.val.string.len = strlen(type_str);
+    
+    ei_x_free(&result_buf);
     return JsonbValueToJsonb(&jbv);
 }
 
