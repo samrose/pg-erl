@@ -182,4 +182,6 @@ SET log_min_messages = 'debug1';
 
 ## License
 
+This extension is licensed under the PostgreSQL License. See the LICENSE file for details.
+
 This extension is provided as-is for educational and development purposes. 
