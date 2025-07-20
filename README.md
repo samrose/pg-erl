@@ -134,6 +134,62 @@ SET log_min_messages = 'debug1';
 2. **Thread Safety**: Assumes backend-local connections; shared connections require additional locking
 3. **Security**: Basic input validation; production use requires additional security measures
 4. **Error Recovery**: Limited handling of Erlang node crashes or network failures
+5. **Synchronous Operations**: Current implementation blocks PostgreSQL backend during Erlang calls
+
+## TODO: Asynchronous Implementation
+
+The current implementation uses synchronous RPC calls that block PostgreSQL's event loop. For production use, the following changes are needed:
+
+### High Priority
+
+- [ ] **Replace synchronous `ei_rpc_to()` with non-blocking I/O**
+  - Implement `ei_xreceive_msg()` with timeout for non-blocking message handling
+  - Use `ei_send()` and `ei_receive()` instead of blocking RPC calls
+  - Set socket file descriptors to non-blocking mode
+
+- [ ] **Implement PostgreSQL Background Worker**
+  - Create background worker to poll for Erlang messages at regular intervals
+  - Handle message processing without blocking the main PostgreSQL process
+  - Integrate with PostgreSQL's event loop using `WaitEventSet`
+
+- [ ] **Add proper response handling**
+  - Fix `erlang_term_to_jsonb()` to properly decode actual Erlang responses
+  - Implement proper message parsing and error handling
+  - Add timeout mechanisms for unresponsive Erlang nodes
+
+### Medium Priority
+
+- [ ] **Implement threading for Erlang communication**
+  - Create dedicated POSIX thread for Erlang communication
+  - Use shared memory queues or pipes for thread-safe message exchange
+  - Ensure PostgreSQL API calls are only made from main thread
+
+- [ ] **Add connection state management**
+  - Implement proper connection pooling with async capabilities
+  - Add connection health monitoring and automatic reconnection
+  - Handle multiple concurrent connections efficiently
+
+- [ ] **Integrate with async I/O libraries**
+  - Consider libuv or libevent integration for robust event loops
+  - Implement proper event-driven architecture
+  - Add support for high-concurrency scenarios
+
+### Low Priority
+
+- [ ] **Enhanced error handling and recovery**
+  - Add comprehensive error handling for network failures
+  - Implement circuit breaker patterns for failing Erlang nodes
+  - Add logging and monitoring capabilities
+
+- [ ] **Security improvements**
+  - Add message validation to prevent injection attacks
+  - Implement proper authentication and authorization
+  - Add rate limiting and resource protection
+
+- [ ] **Performance optimizations**
+  - Implement message batching for multiple calls
+  - Add connection pooling optimizations
+  - Consider caching mechanisms for frequently called functions
 
 ## License
 
