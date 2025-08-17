@@ -7,6 +7,7 @@
 #include "utils/jsonb.h"
 #include "utils/json.h"
 #include "utils/numeric.h"
+#include "utils/builtins.h"
 #include "erlang_cnode.h"
 #include <ei.h>
 
@@ -117,12 +118,14 @@ int jsonb_to_erlang_args(ei_x_buff *buf, Jsonb *args_json) {
     return ei_x_encode_empty_list(buf);
 }
 
-// Convert Erlang term to JSONB (simplified - for response parsing)
+// Forward declaration for recursive decoding
+static JsonbValue *decode_erlang_term_recursive(char *buf, int *index);
+
+// Convert Erlang term to JSONB with full type support
 static Jsonb *erlang_term_to_jsonb(ei_x_buff *buf) {
-    JsonbValue jbv;
-    char result_str[512];
     int index = 0;
     int type, size;
+    JsonbValue *result;
     
     // Skip version byte if present
     if (buf->buff[0] == 131) {
@@ -131,6 +134,7 @@ static Jsonb *erlang_term_to_jsonb(ei_x_buff *buf) {
     
     // Get the type of the response
     if (ei_get_type(buf->buff, &index, &type, &size) < 0) {
+        JsonbValue jbv;
         jbv.type = jbvString;
         jbv.val.string.val = "decode_error";
         jbv.val.string.len = strlen("decode_error");
@@ -141,72 +145,208 @@ static Jsonb *erlang_term_to_jsonb(ei_x_buff *buf) {
     if (type == ERL_SMALL_TUPLE_EXT || type == ERL_LARGE_TUPLE_EXT) {
         int arity;
         if (ei_decode_tuple_header(buf->buff, &index, &arity) < 0) {
-            snprintf(result_str, sizeof(result_str), "tuple_decode_error");
+            JsonbValue jbv;
+            jbv.type = jbvString;
+            jbv.val.string.val = "tuple_decode_error";
+            jbv.val.string.len = strlen("tuple_decode_error");
+            return JsonbValueToJsonb(&jbv);
         } else if (arity == 2) {
             // This is a 2-tuple response from $gen_call: {Ref, Result}
-            // Use ei functions to properly decode
-            
             // Skip first element (reference)
-            int elem_type, elem_size;
-            if (ei_get_type(buf->buff, &index, &elem_type, &elem_size) == 0) {
-                if (elem_type == ERL_BINARY_EXT) {
-                    // Skip the binary using ei_skip_term
-                    ei_skip_term(buf->buff, &index);
-                } else if (elem_type == ERL_NEW_REFERENCE_EXT || elem_type == ERL_NEWER_REFERENCE_EXT) {
-                    erlang_ref ref;
-                    ei_decode_ref(buf->buff, &index, &ref);
-                } else {
-                    // Skip whatever it is
-                    ei_skip_term(buf->buff, &index);
-                }
-            }
+            ei_skip_term(buf->buff, &index);
             
-            // Now decode the second element (the actual result)
-            if (ei_get_type(buf->buff, &index, &elem_type, &elem_size) == 0) {
-                if (elem_type == ERL_ATOM_EXT || elem_type == ERL_SMALL_ATOM_EXT || elem_type == ERL_ATOM_UTF8_EXT || elem_type == ERL_SMALL_ATOM_UTF8_EXT) {
-                    char atom_result[256];
-                    if (ei_decode_atom(buf->buff, &index, atom_result) == 0) {
-                        snprintf(result_str, sizeof(result_str), "%s", atom_result);
-                    } else {
-                        snprintf(result_str, sizeof(result_str), "atom_decode_failed");
-                    }
-                } else if (elem_type == ERL_BINARY_EXT) {
-                    char *binary_data;
-                    long binary_len;
-                    if (ei_decode_binary(buf->buff, &index, (void**)&binary_data, &binary_len) == 0) {
-                        int copy_len = binary_len < 255 ? binary_len : 255;
-                        memcpy(result_str, binary_data, copy_len);
-                        result_str[copy_len] = '\0';
-                        free(binary_data);
-                    } else {
-                        snprintf(result_str, sizeof(result_str), "binary_decode_failed");
-                    }
-                } else {
-                    snprintf(result_str, sizeof(result_str), "result_type_%d", elem_type);
-                }
-            } else {
-                snprintf(result_str, sizeof(result_str), "second_element_type_error");
-            }
+            // Decode the actual result (second element)
+            result = decode_erlang_term_recursive(buf->buff, &index);
+            return JsonbValueToJsonb(result);
         } else {
-            snprintf(result_str, sizeof(result_str), "unexpected_arity_%d", arity);
-        }
-    } else if (type == ERL_ATOM_EXT) {
-        // Direct atom response
-        char atom[256];
-        if (ei_decode_atom(buf->buff, &index, atom) < 0) {
-            snprintf(result_str, sizeof(result_str), "atom_decode_error");
-        } else {
-            snprintf(result_str, sizeof(result_str), "%s", atom);
+            // This is a regular tuple, decode it as an array
+            result = decode_erlang_term_recursive(buf->buff, &index);
+            return JsonbValueToJsonb(result);
         }
     } else {
-        snprintf(result_str, sizeof(result_str), "unsupported_type_%d", type);
+        // Direct response, decode it
+        result = decode_erlang_term_recursive(buf->buff, &index);
+        return JsonbValueToJsonb(result);
+    }
+}
+
+// Recursive function to decode any Erlang term into JsonbValue
+static JsonbValue *decode_erlang_term_recursive(char *buf, int *index) {
+    JsonbValue *jbv;
+    char *string_buffer;
+    int type, size, arity;
+    int i;
+    JsonbParseState *state = NULL;
+    JsonbValue *result;
+    JsonbValue key;
+    
+    // Allocate in PostgreSQL memory context
+    jbv = (JsonbValue *) palloc(sizeof(JsonbValue));
+    string_buffer = (char *) palloc(1024);
+    
+    if (ei_get_type(buf, index, &type, &size) < 0) {
+        jbv->type = jbvString;
+        jbv->val.string.val = pstrdup("type_error");
+        jbv->val.string.len = 10;
+        return jbv;
     }
     
-    jbv.type = jbvString;
-    jbv.val.string.val = result_str;
-    jbv.val.string.len = strlen(result_str);
-    
-    return JsonbValueToJsonb(&jbv);
+    switch (type) {
+        case ERL_ATOM_EXT:
+        case ERL_SMALL_ATOM_EXT:
+        case ERL_ATOM_UTF8_EXT:
+        case ERL_SMALL_ATOM_UTF8_EXT:
+            if (ei_decode_atom(buf, index, string_buffer) == 0) {
+                jbv->type = jbvString;
+                jbv->val.string.val = pstrdup(string_buffer);
+                jbv->val.string.len = strlen(string_buffer);
+            } else {
+                jbv->type = jbvString;
+                jbv->val.string.val = pstrdup("atom_error");
+                jbv->val.string.len = 10;
+            }
+            return jbv;
+            
+        case ERL_BINARY_EXT:
+            {
+                char *binary_data;
+                long binary_len;
+                if (ei_decode_binary(buf, index, (void**)&binary_data, &binary_len) == 0) {
+                    int copy_len = binary_len < 1023 ? binary_len : 1023;
+                    memcpy(string_buffer, binary_data, copy_len);
+                    string_buffer[copy_len] = '\0';
+                    free(binary_data);
+                    jbv->type = jbvString;
+                    jbv->val.string.val = pstrdup(string_buffer);
+                    jbv->val.string.len = copy_len;
+                } else {
+                    jbv->type = jbvString;
+                    jbv->val.string.val = pstrdup("binary_error");
+                    jbv->val.string.len = 12;
+                }
+            }
+            return jbv;
+            
+        case ERL_SMALL_INTEGER_EXT:
+        case ERL_INTEGER_EXT:
+            {
+                long val_long;
+                if (ei_decode_long(buf, index, &val_long) == 0) {
+                    jbv->type = jbvNumeric;
+                    jbv->val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(val_long)));
+                } else {
+                    jbv->type = jbvString;
+                    jbv->val.string.val = pstrdup("integer_error");
+                    jbv->val.string.len = 13;
+                }
+            }
+            return jbv;
+            
+        case ERL_FLOAT_EXT:
+        case NEW_FLOAT_EXT:
+            {
+                double val_double;
+                if (ei_decode_double(buf, index, &val_double) == 0) {
+                    jbv->type = jbvNumeric;
+                    jbv->val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(val_double)));
+                } else {
+                    jbv->type = jbvString;
+                    jbv->val.string.val = pstrdup("float_error");
+                    jbv->val.string.len = 11;
+                }
+            }
+            return jbv;
+            
+        case ERL_SMALL_TUPLE_EXT:
+        case ERL_LARGE_TUPLE_EXT:
+            if (ei_decode_tuple_header(buf, index, &arity) == 0) {
+                // Decode tuple as JSON array
+                pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+                
+                for (i = 0; i < arity; i++) {
+                    JsonbValue *elem = decode_erlang_term_recursive(buf, index);
+                    pushJsonbValue(&state, WJB_ELEM, elem);
+                }
+                
+                result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+                return result;
+            } else {
+                jbv->type = jbvString;
+                jbv->val.string.val = pstrdup("tuple_error");
+                jbv->val.string.len = 11;
+                return jbv;
+            }
+            
+        case ERL_LIST_EXT:
+        case ERL_NIL_EXT:
+            if (type == ERL_NIL_EXT) {
+                // Empty list
+                pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+                result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+                return result;
+            } else {
+                // Non-empty list
+                if (ei_decode_list_header(buf, index, &arity) == 0) {
+                    pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+                    
+                    for (i = 0; i < arity; i++) {
+                        JsonbValue *elem = decode_erlang_term_recursive(buf, index);
+                        pushJsonbValue(&state, WJB_ELEM, elem);
+                    }
+                    
+                    // Handle list tail (should be NIL for proper lists)
+                    // Skip the tail - we assume proper lists ending with NIL
+                    ei_skip_term(buf, index);
+                    
+                    result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+                    return result;
+                } else {
+                    jbv->type = jbvString;
+                    jbv->val.string.val = pstrdup("list_error");
+                    jbv->val.string.len = 10;
+                    return jbv;
+                }
+            }
+            
+        case ERL_MAP_EXT:
+            if (ei_decode_map_header(buf, index, &arity) == 0) {
+                pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+                
+                for (i = 0; i < arity; i++) {
+                    // Decode key
+                    JsonbValue *key_val = decode_erlang_term_recursive(buf, index);
+                    if (key_val->type == jbvString) {
+                        pushJsonbValue(&state, WJB_KEY, key_val);
+                    } else {
+                        // Convert non-string keys to strings
+                        snprintf(string_buffer, 1024, "key_%d", i);
+                        key.type = jbvString;
+                        key.val.string.val = pstrdup(string_buffer);
+                        key.val.string.len = strlen(string_buffer);
+                        pushJsonbValue(&state, WJB_KEY, &key);
+                    }
+                    
+                    // Decode value
+                    JsonbValue *val_val = decode_erlang_term_recursive(buf, index);
+                    pushJsonbValue(&state, WJB_VALUE, val_val);
+                }
+                
+                result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+                return result;
+            } else {
+                jbv->type = jbvString;
+                jbv->val.string.val = pstrdup("map_error");
+                jbv->val.string.len = 9;
+                return jbv;
+            }
+            
+        default:
+            snprintf(string_buffer, 1024, "unsupported_type_%d", type);
+            jbv->type = jbvString;
+            jbv->val.string.val = pstrdup(string_buffer);
+            jbv->val.string.len = strlen(string_buffer);
+            return jbv;
+    }
 }
 
 // Helper function to encode a simple list of arguments

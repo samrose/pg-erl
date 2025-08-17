@@ -139,11 +139,18 @@ Datum erlang_connect(PG_FUNCTION_ARGS) {
     
     ereport(NOTICE, (errmsg("Connection established successfully")));
 
-    conn = (ErlangConnection *) hash_search(connection_map, node_name, HASH_ENTER, &found);
+    conn = (ErlangConnection *) hash_search(connection_map, node_name, HASH_FIND, &found);
     if (found) {
-        ereport(NOTICE, (errmsg("Closing existing connection fd: %d", conn->fd)));
-        close(conn->fd);
+        ereport(NOTICE, (errmsg("Connection already exists with fd: %d, reusing", conn->fd)));
+        MemoryContextSwitchTo(oldcontext);
+        MemoryContextDelete(tmpcontext);
+        pfree(node_name);
+        pfree(cookie);
+        PG_RETURN_BOOL(true);
     }
+    
+    // Create new connection entry
+    conn = (ErlangConnection *) hash_search(connection_map, node_name, HASH_ENTER, &found);
     strlcpy(conn->node_name, node_name, MAX_NODE_NAME);
     strlcpy(conn->cookie, cookie, MAX_COOKIE);
     conn->fd = fd;
@@ -198,7 +205,6 @@ static Datum erlang_call_internal(PG_FUNCTION_ARGS, int timeout_ms) {
     ei_x_buff send_buf;
     ei_x_buff recv_buf;
     Jsonb *result;
-    erlang_ref ref;
     erlang_msg msg;
     
     node_name_text = PG_GETARG_TEXT_PP(0);

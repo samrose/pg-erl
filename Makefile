@@ -29,7 +29,7 @@ ERL_INTERFACE_LIB_DIR ?= /usr/lib/erlang/usr/lib
 # ERL_INTERFACE_INCLUDE_DIR ?= /usr/lib64/erlang/usr/include
 # ERL_INTERFACE_LIB_DIR ?= /usr/lib64/erlang/usr/lib
 
-.PHONY: clean install uninstall
+.PHONY: clean install uninstall test
 
 clean:
 	rm -f $(OBJS) $(MODULE_big).so
@@ -38,4 +38,13 @@ install: all
 	$(MAKE) -f $(PGXS) install
 
 uninstall:
-	$(MAKE) -f $(PGXS) uninstall 
+	$(MAKE) -f $(PGXS) uninstall
+
+test: all
+	@echo "Starting test suite..."
+	@echo "Make sure an Erlang node is running with: erl -sname testnode -setcookie cookie123"
+	@echo "Creating test database..."
+	-psql -d postgres -c "DROP DATABASE IF EXISTS test_erlang_cnode;"
+	psql -d postgres -c "CREATE DATABASE test_erlang_cnode;"
+	@echo "Running tests..."
+	psql -d test_erlang_cnode -f test_erlang_cnode.sql 
