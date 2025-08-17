@@ -42,4 +42,7 @@ Datum erlang_cast(PG_FUNCTION_ARGS);
 Datum erlang_check_connection(PG_FUNCTION_ARGS);
 Datum erlang_pending_requests(PG_FUNCTION_ARGS);
 
+// JSONB conversion function declarations
+int jsonb_to_erlang_args(ei_x_buff *buf, Jsonb *args_json);
+
 #endif 

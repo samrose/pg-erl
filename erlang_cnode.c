@@ -251,7 +251,19 @@ static Datum erlang_call_internal(PG_FUNCTION_ARGS, int timeout_ms) {
     ei_x_encode_atom(&send_buf, "call");
     ei_x_encode_atom(&send_buf, module);
     ei_x_encode_atom(&send_buf, function);
-    ei_x_encode_empty_list(&send_buf);  // Args = []
+    
+    // Encode actual args from JSONB
+    if (jsonb_to_erlang_args(&send_buf, args_json) < 0) {
+        ei_x_free(&send_buf);
+        ei_x_free(&recv_buf);
+        MemoryContextSwitchTo(oldcontext);
+        MemoryContextDelete(tmpcontext);
+        pfree(node_name);
+        pfree(module);
+        pfree(function);
+        ereport(ERROR, (errmsg("Failed to encode function arguments")));
+    }
+    
     ei_x_encode_atom(&send_buf, "user");  // Group leader
     
     ereport(NOTICE, (errmsg("Sending manual RPC message to rex process...")));
@@ -303,72 +315,59 @@ static Datum erlang_call_internal(PG_FUNCTION_ARGS, int timeout_ms) {
     PG_RETURN_JSONB_P(result);
 }
 
-// Test basic connectivity with direct message passing (no RPC)
+// Test basic connectivity using RPC to erlang:is_alive()
 PG_FUNCTION_INFO_V1(erlang_ping);
 Datum erlang_ping(PG_FUNCTION_ARGS) {
     text *node_name_text;
     char *node_name;
-    bool found;
-    ErlangConnection *conn;
-    ei_x_buff send_buf;
-    ei_x_buff recv_buf;
-    erlang_msg msg;
+    Jsonb *empty_args;
+    Jsonb *result;
     text *result_text;
-    int recv_result;
     
     node_name_text = PG_GETARG_TEXT_PP(0);
     node_name = text_to_cstring(node_name_text);
     
-    conn = (ErlangConnection *) hash_search(connection_map, node_name, HASH_FIND, &found);
-    if (!found) {
+    // Create empty args array for RPC call
+    empty_args = JsonbValueToJsonb(&(JsonbValue){
+        .type = jbvArray,
+        .val.array.nElems = 0
+    });
+    
+    ereport(NOTICE, (errmsg("Pinging node %s using erlang:is_alive()", node_name)));
+    
+    // Use the existing RPC system to call erlang:is_alive()
+    PG_TRY();
+    {
+        result = DatumGetJsonbP(DirectFunctionCall5(erlang_call_with_timeout,
+                                                   PointerGetDatum(node_name_text),
+                                                   PointerGetDatum(cstring_to_text("erlang")),
+                                                   PointerGetDatum(cstring_to_text("is_alive")),
+                                                   JsonbPGetDatum(empty_args),
+                                                   Int32GetDatum(2000))); // 2 second timeout
+        
+        // Check the result - convert JSONB to string
+        StringInfoData buf;
+        initStringInfo(&buf);
+        JsonbToCString(&buf, &result->root, VARSIZE(result));
+        
+        // The JSON string will be "true" (with quotes), so we need to check for that
+        if (strcmp(buf.data, "\"true\"") == 0) {
+            result_text = cstring_to_text("ALIVE");
+        } else {
+            result_text = cstring_to_text("NOT_ALIVE");
+        }
+        pfree(buf.data);
+    }
+    PG_CATCH();
+    {
+        // If RPC failed, return connection error
+        result_text = cstring_to_text("CONNECTION_FAILED");
         pfree(node_name);
-        ereport(ERROR, (errmsg("No connection to node: %s", node_name)));
+        PG_RE_THROW();
     }
+    PG_END_TRY();
     
-    ereport(NOTICE, (errmsg("Testing basic connectivity to node: %s (fd: %d)", node_name, conn->fd)));
-    
-    // Initialize buffers
-    ei_x_new_with_version(&send_buf);
-    ei_x_new(&recv_buf);
-    
-    // Send a simple ping message to the shell process
-    ei_x_encode_atom(&send_buf, "ping");
-    
-    // Send to the shell process (user process)  
-    if (ei_reg_send(&conn->ec, conn->fd, "user", send_buf.buff, send_buf.index) < 0) {
-        int err = errno;
-        ei_x_free(&send_buf);
-        ei_x_free(&recv_buf);
-        pfree(node_name);
-        ereport(ERROR, (errmsg("Failed to send ping message: %s", strerror(err))));
-    }
-    
-    ereport(NOTICE, (errmsg("Ping message sent, waiting for any response...")));
-    
-    // Try to receive any message (with 5 second timeout)
-    recv_result = ei_receive_msg_tmo(conn->fd, &msg, &recv_buf, 5000);
-    
-    if (recv_result == ERL_TICK) {
-        result_text = cstring_to_text("TICK_RECEIVED");
-    } else if (recv_result == ERL_MSG) {
-        char response[256];
-        snprintf(response, sizeof(response), "MESSAGE_RECEIVED_TYPE_%ld_FROM_%s", 
-                (long)msg.msgtype, msg.from.node);
-        result_text = cstring_to_text(response);
-    } else if (recv_result == ERL_ERROR) {
-        char response[256];
-        snprintf(response, sizeof(response), "ERROR_%d", errno);
-        result_text = cstring_to_text(response);
-    } else {
-        char response[256];
-        snprintf(response, sizeof(response), "UNKNOWN_RESULT_%d", recv_result);
-        result_text = cstring_to_text(response);
-    }
-    
-    ei_x_free(&send_buf);
-    ei_x_free(&recv_buf);
     pfree(node_name);
-    
     PG_RETURN_TEXT_P(result_text);
 }
 
@@ -474,8 +473,16 @@ Datum erlang_send_async(PG_FUNCTION_ARGS) {
     ei_x_encode_atom(&send_buf, module);
     ei_x_encode_atom(&send_buf, function);
     
-    // TODO: Encode actual args from JSONB
-    ei_x_encode_empty_list(&send_buf);
+    // Encode actual args from JSONB
+    if (jsonb_to_erlang_args(&send_buf, args_json) < 0) {
+        ei_x_free(&send_buf);
+        ei_x_free(&request->response);
+        hash_search(async_request_map, &request_id, HASH_REMOVE, NULL);
+        pfree(node_name);
+        pfree(module);
+        pfree(function);
+        ereport(ERROR, (errmsg("Failed to encode function arguments")));
+    }
     
     ei_x_encode_atom(&send_buf, "user");
     
@@ -635,8 +642,14 @@ Datum erlang_cast(PG_FUNCTION_ARGS) {
     ei_x_encode_atom(&send_buf, module);
     ei_x_encode_atom(&send_buf, function);
     
-    // TODO: Encode actual args from JSONB
-    ei_x_encode_empty_list(&send_buf);
+    // Encode actual args from JSONB
+    if (jsonb_to_erlang_args(&send_buf, args_json) < 0) {
+        ei_x_free(&send_buf);
+        pfree(node_name);
+        pfree(module);
+        pfree(function);
+        ereport(ERROR, (errmsg("Failed to encode function arguments")));
+    }
     
     // Send to rex process
     if (ei_reg_send(&conn->ec, conn->fd, "rex", send_buf.buff, send_buf.index) < 0) {

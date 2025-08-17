@@ -10,6 +10,14 @@
 #include "utils/builtins.h"
 #include "erlang_cnode.h"
 #include <ei.h>
+#include <math.h>
+#ifndef MAXATOMLEN
+#define MAXATOMLEN 256
+#endif
+
+// Forward declarations
+static int encode_special_erlang_object(ei_x_buff *buf, JsonbValue *obj);
+static int encode_special_erlang_type(ei_x_buff *buf, const char *type_str);
 
 // Convert JSONB value to Erlang term
 static int jsonb_value_to_erlang_term(ei_x_buff *buf, JsonbValue *jbv) {
@@ -18,13 +26,26 @@ static int jsonb_value_to_erlang_term(ei_x_buff *buf, JsonbValue *jbv) {
             return ei_x_encode_atom(buf, "null");
             
         case jbvString:
+            // Check for special Erlang type encoding
+            if (jbv->val.string.len > 7 && strncmp(jbv->val.string.val, "{\"$type\":", 9) == 0) {
+                // This is a special type object, parse it
+                return encode_special_erlang_type(buf, jbv->val.string.val);
+            }
             return ei_x_encode_string(buf, jbv->val.string.val);
             
         case jbvNumeric:
-            // Handle numeric types more carefully
-            // For simplicity, convert all numerics to double
-            double val = DatumGetFloat8(DirectFunctionCall1(numeric_float8, NumericGetDatum(jbv->val.numeric)));
-            return ei_x_encode_double(buf, val);
+            // Convert numeric to double (Erlang can handle both int and float as numbers)
+            {
+                double val = DatumGetFloat8(DirectFunctionCall1(numeric_float8, NumericGetDatum(jbv->val.numeric)));
+                // Check if it's a whole number
+                if (val == floor(val) && val >= INT64_MIN && val <= INT64_MAX) {
+                    // It's an integer-like value, encode as long
+                    return ei_x_encode_longlong(buf, (int64)val);
+                } else {
+                    // It's a float
+                    return ei_x_encode_double(buf, val);
+                }
+            }
             
         case jbvBool:
             return ei_x_encode_atom(buf, jbv->val.boolean ? "true" : "false");
@@ -52,7 +73,13 @@ static int jsonb_value_to_erlang_term(ei_x_buff *buf, JsonbValue *jbv) {
             return ei_x_encode_empty_list(buf);
             
         case jbvObject:
-            // Convert object to Erlang map
+            // Check if this is a special type object
+            JsonbValue *type_val = findJsonbValueFromContainer(&jbv->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "$type", .val.string.len = 5});
+            if (type_val && type_val->type == jbvString) {
+                return encode_special_erlang_object(buf, jbv);
+            }
+            
+            // Convert regular object to Erlang map
             if (ei_x_encode_map_header(buf, jbv->val.object.nPairs) < 0) {
                 return -1;
             }
@@ -87,22 +114,113 @@ static int jsonb_value_to_erlang_term(ei_x_buff *buf, JsonbValue *jbv) {
     }
 }
 
+// Helper function to encode special Erlang types from JSON objects
+static int encode_special_erlang_object(ei_x_buff *buf, JsonbValue *obj) {
+    JsonbValue *type_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "$type", .val.string.len = 5});
+    
+    if (!type_val || type_val->type != jbvString) {
+        return -1;
+    }
+    
+    if (strncmp(type_val->val.string.val, "atom", 4) == 0) {
+        // Encode as atom: {"$type": "atom", "value": "atom_name"}
+        JsonbValue *value_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "value", .val.string.len = 5});
+        if (value_val && value_val->type == jbvString) {
+            return ei_x_encode_atom(buf, value_val->val.string.val);
+        }
+    } else if (strncmp(type_val->val.string.val, "tuple", 5) == 0) {
+        // Encode as tuple: {"$type": "tuple", "elements": [...]}
+        JsonbValue *elements_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "elements", .val.string.len = 8});
+        if (elements_val && elements_val->type == jbvArray) {
+            if (ei_x_encode_tuple_header(buf, elements_val->val.array.nElems) < 0) {
+                return -1;
+            }
+            
+            JsonbIterator *it;
+            JsonbValue v;
+            int type;
+            
+            it = JsonbIteratorInit(&elements_val->val.array.elems);
+            while ((type = JsonbIteratorNext(&it, &v, false)) != WJB_DONE) {
+                if (type == WJB_ELEM) {
+                    if (jsonb_value_to_erlang_term(buf, &v) < 0) {
+                        return -1;
+                    }
+                }
+            }
+            return 0;
+        }
+    } else if (strncmp(type_val->val.string.val, "binary", 6) == 0) {
+        // Encode as binary: {"$type": "binary", "data": "base64_encoded_data"}
+        JsonbValue *data_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "data", .val.string.len = 4});
+        if (data_val && data_val->type == jbvString) {
+            // For simplicity, treat as string for now
+            return ei_x_encode_binary(buf, data_val->val.string.val, data_val->val.string.len);
+        }
+    } else if (strncmp(type_val->val.string.val, "pid", 3) == 0) {
+        // Encode PID: {"$type": "pid", "node": "node@host", "id": 123, "serial": 456, "creation": 1}
+        // For now, we'll encode as a special tuple format that Erlang can understand
+        JsonbValue *node_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "node", .val.string.len = 4});
+        JsonbValue *id_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "id", .val.string.len = 2});
+        JsonbValue *serial_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "serial", .val.string.len = 6});
+        JsonbValue *creation_val = findJsonbValueFromContainer(&obj->val.object, JB_FOBJECT, &(JsonbValue){.type = jbvString, .val.string.val = "creation", .val.string.len = 8});
+        
+        if (node_val && id_val && serial_val && creation_val) {
+            erlang_pid pid;
+            strncpy(pid.node, node_val->val.string.val, MAXATOMLEN);
+            pid.node[MAXATOMLEN-1] = '\0';
+            pid.num = (int)DatumGetInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(id_val->val.numeric)));
+            pid.serial = (int)DatumGetInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(serial_val->val.numeric)));
+            pid.creation = (int)DatumGetInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(creation_val->val.numeric)));
+            
+            return ei_x_encode_pid(buf, &pid);
+        }
+    }
+    
+    // Fallback: encode as regular map
+    return -1;
+}
+
+// Helper function for parsing special type strings (deprecated, use objects instead)
+static int encode_special_erlang_type(ei_x_buff *buf, const char *type_str) {
+    // This is for backward compatibility with string-based special types
+    // Format: {"$type": "atom", "value": "atom_name"}
+    // For now, just return error and require object format
+    return -1;
+}
+
 // Convert JSONB to Erlang term list (for function arguments)
 int jsonb_to_erlang_args(ei_x_buff *buf, Jsonb *args_json) {
-    JsonbIterator *it = JsonbIteratorInit(&args_json->root);
+    JsonbIterator *it;
     JsonbValue v;
     int type;
     int count = 0;
     
-    // Count elements first
+    // Check if this is an array at the root
+    it = JsonbIteratorInit(&args_json->root);
+    type = JsonbIteratorNext(&it, &v, false);
+    
+    if (type != WJB_BEGIN_ARRAY) {
+        // Not an array, encode as empty list
+        return ei_x_encode_empty_list(buf);
+    }
+    
+    // Count elements in the array
     while ((type = JsonbIteratorNext(&it, &v, false)) != WJB_DONE) {
         if (type == WJB_ELEM) {
             count++;
         }
     }
     
+    // If no elements, encode as empty list
+    if (count == 0) {
+        return ei_x_encode_empty_list(buf);
+    }
+    
     // Reset iterator and encode as list
     it = JsonbIteratorInit(&args_json->root);
+    JsonbIteratorNext(&it, &v, false); // Skip WJB_BEGIN_ARRAY
+    
     if (ei_x_encode_list_header(buf, count) < 0) {
         return -1;
     }
