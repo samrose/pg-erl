@@ -191,6 +191,178 @@ The current implementation uses synchronous RPC calls that block PostgreSQL's ev
   - Add connection pooling optimizations
   - Consider caching mechanisms for frequently called functions
 
+## Comprehensive Improvement Roadmap
+
+Based on a thorough code analysis, the following improvements should be implemented to make this extension production-ready:
+
+### Critical Issues - Must Fix Before Production
+
+#### 1. Debug/Notice Statement Cleanup
+- [ ] Remove all `ereport(NOTICE,...)` debug statements from production code (erlang_cnode.c:76-135, 236, 269, etc.)
+- [ ] Implement conditional debug logging controlled by configuration parameter
+- [ ] Remove sensitive information exposure (HOME environment, cookie paths)
+- [ ] Add proper log levels (DEBUG1-5) for development vs production
+
+#### 2. Memory Management & Resource Cleanup
+- [ ] Fix memory leaks in error paths (erlang_cnode.c:256-265, 477-484, 491-497)
+- [ ] Ensure all `ei_x_buff` structures are freed in all code paths
+- [ ] Add `PG_TRY/PG_CATCH` blocks for proper cleanup on exceptions
+- [ ] Review and fix all `palloc` calls without corresponding `pfree`
+- [ ] Implement proper memory context management for long-lived connections
+
+#### 3. Error Handling & Recovery
+- [ ] Add comprehensive error checking for all ei library calls
+- [ ] Implement automatic reconnection on connection failure
+- [ ] Add connection retry logic with exponential backoff
+- [ ] Properly handle all errno values from socket operations
+- [ ] Add transaction-safe error recovery mechanisms
+- [ ] Implement proper cleanup in signal handlers
+
+#### 4. Security Vulnerabilities
+- [ ] Add input validation for node names (prevent injection attacks)
+- [ ] Validate cookie format and length
+- [ ] Encrypt or secure cookie storage in memory
+- [ ] Add SQL injection prevention for all user inputs
+- [ ] Implement rate limiting to prevent DoS attacks
+- [ ] Add connection attempt limits per session
+- [ ] Remove environment variable exposure in logs
+- [ ] Add authentication beyond simple cookie verification
+
+### High Priority Improvements
+
+#### 5. Connection Pool Management
+- [ ] Add proper locking for multi-process/thread safety
+- [ ] Implement connection pool size limits
+- [ ] Add connection age and idle timeout tracking
+- [ ] Implement health checks with automatic stale connection removal
+- [ ] Add connection statistics and monitoring
+- [ ] Implement proper connection lifecycle management
+- [ ] Add support for connection pooling across backends
+
+#### 6. Type Conversion Completeness
+- [ ] Complete JSONB to Erlang term conversion (jsonb_erlang_converter.c:185-189)
+- [ ] Implement proper special type string parsing
+- [ ] Add support for Erlang references
+- [ ] Add support for Erlang ports
+- [ ] Improve binary data handling with proper encoding/decoding
+- [ ] Add support for improper lists
+- [ ] Implement big integer support
+- [ ] Add comprehensive type conversion tests
+- [ ] Handle UTF-8 and Latin-1 string encodings properly
+
+#### 7. Async Implementation Fixes
+- [ ] Add size limits to AsyncRequest hash table
+- [ ] Implement request expiration and cleanup
+- [ ] Add proper timeout handling for async requests
+- [ ] Fix race conditions in request tracking
+- [ ] Implement request cancellation
+- [ ] Add async request statistics
+- [ ] Clean up completed requests periodically
+- [ ] Add maximum pending request limits
+
+### Medium Priority Enhancements
+
+#### 8. Performance Optimizations
+- [ ] Replace synchronous blocking I/O with true async
+- [ ] Implement connection pooling and reuse
+- [ ] Optimize string operations and conversions
+- [ ] Add caching for frequently called functions
+- [ ] Reduce maximum timeout values to prevent backend blocking
+- [ ] Implement batch operations for multiple calls
+- [ ] Add prepared statement support for repeated calls
+- [ ] Optimize JSONB parsing and generation
+
+#### 9. Monitoring & Observability
+- [ ] Add connection metrics (active, idle, failed)
+- [ ] Implement call latency tracking
+- [ ] Add error rate monitoring
+- [ ] Create system views for connection status
+- [ ] Add performance statistics collection
+- [ ] Implement trace logging for debugging
+- [ ] Add integration with PostgreSQL's statistics collector
+- [ ] Create monitoring functions for health checks
+
+#### 10. Testing Infrastructure
+- [ ] Add comprehensive unit tests for all functions
+- [ ] Implement integration tests with real Erlang nodes
+- [ ] Add stress tests for connection pooling
+- [ ] Create performance benchmarks
+- [ ] Add memory leak detection tests
+- [ ] Implement chaos testing for failure scenarios
+- [ ] Add regression tests for bug fixes
+- [ ] Create automated test suite in CI/CD
+
+### Long-term Strategic Improvements
+
+#### 11. Architecture Refactoring
+- [ ] Implement proper background worker for async operations
+- [ ] Add support for multiple background workers
+- [ ] Create proper abstraction layers
+- [ ] Implement plugin architecture for extensions
+- [ ] Add support for custom protocols
+- [ ] Consider using libpq for connection management
+- [ ] Implement proper state machine for connections
+
+#### 12. Feature Enhancements
+- [ ] Add support for Erlang node discovery
+- [ ] Implement distributed transaction support
+- [ ] Add support for Erlang term storage in tables
+- [ ] Create foreign data wrapper interface
+- [ ] Add support for streaming results
+- [ ] Implement publish/subscribe mechanisms
+- [ ] Add support for OTP gen_server calls
+- [ ] Create stored procedure support in Erlang
+
+#### 13. Documentation & Usability
+- [ ] Add comprehensive inline code documentation
+- [ ] Create detailed API documentation
+- [ ] Add architecture diagrams
+- [ ] Write performance tuning guide
+- [ ] Create troubleshooting guide
+- [ ] Add migration guide from other solutions
+- [ ] Create example applications
+- [ ] Add best practices documentation
+
+#### 14. Compatibility & Portability
+- [ ] Test and support multiple PostgreSQL versions (12-16)
+- [ ] Add support for different Erlang/OTP versions
+- [ ] Test on multiple operating systems
+- [ ] Add ARM architecture support
+- [ ] Ensure compatibility with PostgreSQL extensions
+- [ ] Add support for connection through proxies
+- [ ] Test with various network configurations
+
+#### 15. Production Readiness
+- [ ] Add circuit breaker pattern implementation
+- [ ] Implement graceful degradation
+- [ ] Add connection warmup procedures
+- [ ] Create operational runbooks
+- [ ] Add deployment automation scripts
+- [ ] Implement zero-downtime upgrade procedures
+- [ ] Add backup and recovery procedures
+- [ ] Create disaster recovery plans
+
+### Code Quality Improvements
+
+#### 16. Code Structure & Maintainability
+- [ ] Split large functions into smaller, testable units
+- [ ] Remove code duplication
+- [ ] Improve variable naming consistency
+- [ ] Add proper error code definitions
+- [ ] Create consistent coding style
+- [ ] Add static analysis tools integration
+- [ ] Implement code coverage tracking
+- [ ] Add continuous integration pipelines
+
+#### 17. Build System & Dependencies
+- [ ] Review and minimize dependencies
+- [ ] Add dependency version management
+- [ ] Improve build system configuration
+- [ ] Add cross-compilation support
+- [ ] Create reproducible builds
+- [ ] Add package management support (PGXN)
+- [ ] Implement automated release process
+
 ## License
 
 This extension is licensed under the PostgreSQL License. See the LICENSE file for details.
